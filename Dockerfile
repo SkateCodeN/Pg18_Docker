@@ -20,20 +20,22 @@ RUN sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && locale-
 RUN wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add -
 
 # Add the PGDG snapshot repository for PostgreSQL 18 (for Bookworm)
-RUN echo "deb https://apt.postgresql.org/pub/repos/apt/ bookworm-pgdg-snapshot main 18" > /etc/apt/sources.list.d/pgdg.list
+RUN echo "deb https://apt.postgresql.org/pub/repos/apt/ bookworm-pgdg-snapshot main 18" \
+    > /etc/apt/sources.list.d/pgdg.list
 
 # Temporarily add Debian unstable to upgrade postgresql-common
-RUN echo "deb http://deb.debian.org/debian unstable main" > /etc/apt/sources.list.d/unstable.list && \
+RUN echo "deb http://deb.debian.org/debian unstable main" \
+    > /etc/apt/sources.list.d/unstable.list && \
     cat <<EOF > /etc/apt/preferences.d/postgresql-common
 Package: postgresql-common
 Pin: release a=unstable
 Pin-Priority: 1001
 EOF
 
-# Update and install upgraded postgresql-common from unstable; then remove the unstable repo
+# Update and install upgraded postgresql-common from unstable; then remove unstable repo
 RUN apt-get update && apt-get install -y postgresql-common && rm /etc/apt/sources.list.d/unstable.list
 
-# Pin packages from PGDG to ensure snapshot versions are used
+# Pin packages from PGDG to ensure snapshot packages are used
 RUN cat <<EOF > /etc/apt/preferences.d/pgdg
 Package: *
 Pin: origin apt.postgresql.org
@@ -51,7 +53,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
 # Archive the PostgreSQL installation directories (binaries and shared files)
 RUN tar czf /tmp/pg18.tar.gz /usr/lib/postgresql/18 /usr/share/postgresql/18
 
-# Archive the newer libpq libraries (from PGDG, typically found in /usr/lib/x86_64-linux-gnu/)
+# Archive the newer libpq libraries (from PGDG, typically in /usr/lib/x86_64-linux-gnu/)
 RUN tar czf /tmp/libpq.tar.gz /usr/lib/x86_64-linux-gnu/libpq.so.5*
   
 ############################
@@ -59,19 +61,16 @@ RUN tar czf /tmp/libpq.tar.gz /usr/lib/x86_64-linux-gnu/libpq.so.5*
 ############################
 FROM debian:bookworm-slim
 
-# Install runtime dependencies, explicitly adding libcurl4 for libcurl.so.4
+# Install only the core runtime dependencies needed by PostgreSQL
 RUN apt-get update && apt-get install -y \
     libreadline8 \
     libssl3 \
     zlib1g \
-    libxml2 \
-    libxslt1.1 \
     libc6 \
     libgcc1 \
     libstdc++6 \
     locales \
     libicu72 \
-    perl-base \
     libkrb5-3 \
     libgssapi-krb5-2 \
     libcurl4 \
@@ -99,7 +98,7 @@ RUN tar xzf /tmp/libpq.tar.gz -C / && rm /tmp/libpq.tar.gz
 RUN groupadd -r postgres && useradd -r -g postgres postgres && \
     mkdir -p /var/lib/postgresql/data && chown -R postgres:postgres /var/lib/postgresql/data
 
-# Create /var/run/postgresql directory for lock files and set proper permissions
+# Create /var/run/postgresql for lock files and set proper permissions
 RUN mkdir -p /var/run/postgresql && chown -R postgres:postgres /var/run/postgresql
 
 EXPOSE 5432
@@ -111,3 +110,13 @@ RUN /usr/lib/postgresql/18/bin/initdb -D /var/lib/postgresql/data -E UTF8
 
 # Start PostgreSQL with JIT disabled
 CMD ["/usr/lib/postgresql/18/bin/postgres", "-D", "/var/lib/postgresql/data", "-c", "jit=off"]
+
+
+# In this version, we’ve removed libraries that are less 
+# likely needed by the core server 
+# (such as libxml2, libxslt1.1, perl-base, and sysstat)
+#  while retaining the essentials.
+#   (Note that if your PostgreSQL build uses ICU support, 
+#   you may need libicu72, but if you can live without ICU 
+#   collations, you might remove that too.) 
+#   Adjust according to your needs.
