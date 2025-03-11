@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.4
 ############################
-# Build Stage
+# Builder Stage
 ############################
 FROM debian:bookworm-slim AS builder
 
@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y \
     software-properties-common \
  && rm -rf /var/lib/apt/lists/*
 
-# Generate locale
+# Generate locale (required by some packages)
 RUN sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && locale-gen
 
 # Add the PostgreSQL signing key (PGDG)
@@ -30,17 +30,18 @@ Pin: release a=unstable
 Pin-Priority: 1001
 EOF
 
-# Update and install upgraded postgresql-common from unstable; then remove the unstable repo
+# Update and install upgraded postgresql-common from unstable; then remove unstable repo
 RUN apt-get update && apt-get install -y postgresql-common && rm /etc/apt/sources.list.d/unstable.list
 
-# Pin packages from PGDG to ensure snapshot packages are used
+# Pin packages from PGDG to ensure snapshot versions are used
 RUN cat <<EOF > /etc/apt/preferences.d/pgdg
 Package: *
 Pin: origin apt.postgresql.org
 Pin-Priority: 1001
 EOF
 
-# Update package lists and install PostgreSQL 18 and its client (omit the JIT package)
+# Update package lists and install PostgreSQL 18 and its client from PGDG snapshot
+# (This installs the newer libpq5 from PGDG)
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     libpq5 \
     postgresql-18 \
@@ -51,16 +52,15 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
 # Archive the PostgreSQL installation directories (binaries and shared files)
 RUN tar czf /tmp/pg18.tar.gz /usr/lib/postgresql/18 /usr/share/postgresql/18
 
-# Also archive the new libpq libraries (from PGDG, they should be in /usr/lib/x86_64-linux-gnu/)
+# Archive the newer libpq libraries (should be in /usr/lib/x86_64-linux-gnu/)
 RUN tar czf /tmp/libpq.tar.gz /usr/lib/x86_64-linux-gnu/libpq.so.5*
-
+  
 ############################
 # Final Stage
 ############################
-
 FROM debian:bookworm-slim
 
-# Install runtime dependencies, including the missing libkrb5-3 package and other required libraries
+# Install runtime dependencies, excluding libpq5 (we will copy it from the builder)
 RUN apt-get update && apt-get install -y \
     libreadline8 \
     libssl3 \
@@ -83,20 +83,22 @@ ENV LC_ALL=en_US.UTF-8
 
 # Set PATH to include PostgreSQL 18 binaries
 ENV PATH="/usr/lib/postgresql/18/bin:${PATH}"
+# Set LD_LIBRARY_PATH so that PostgreSQL finds the correct libpq
+ENV LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
 
-# Copy PostgreSQL 18 installation (binaries and shared files) from builder stage
-COPY --from=builder /usr/lib/postgresql/18/ /usr/lib/postgresql/18/
-COPY --from=builder /usr/share/postgresql/18/ /usr/share/postgresql/18/
+# Copy PostgreSQL 18 binaries and shared files from builder stage
+COPY --from=builder /tmp/pg18.tar.gz /tmp/pg18.tar.gz
+RUN tar xzf /tmp/pg18.tar.gz -C / && rm /tmp/pg18.tar.gz
 
-# Copy newer libpq libraries from builder stage (if needed)
-# (We assume other necessary libraries have been installed via apt)
-# COPY --from=builder /usr/lib/x86_64-linux-gnu/libpq.so.5* /usr/lib/x86_64-linux-gnu/
+# Copy the newer libpq libraries from builder stage
+COPY --from=builder /tmp/libpq.tar.gz /tmp/libpq.tar.gz
+RUN tar xzf /tmp/libpq.tar.gz -C / && rm /tmp/libpq.tar.gz
 
-# Create the postgres user and group (if not already present) and set up the data directory
+# Create the postgres user and group (if not present) and set up the data directory
 RUN groupadd -r postgres && useradd -r -g postgres postgres && \
     mkdir -p /var/lib/postgresql/data && chown -R postgres:postgres /var/lib/postgresql/data
 
-# Create /var/run/postgresql directory for lock files
+# Create /var/run/postgresql directory for lock files and set proper permissions
 RUN mkdir -p /var/run/postgresql && chown -R postgres:postgres /var/run/postgresql
 
 EXPOSE 5432
