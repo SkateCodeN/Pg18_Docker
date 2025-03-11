@@ -13,14 +13,15 @@ RUN apt-get update && apt-get install -y \
     software-properties-common \
  && rm -rf /var/lib/apt/lists/*
 
-# Generate locale (required by some packages)
+# Generate locale
 RUN sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && locale-gen
 
 # Add the PostgreSQL signing key (PGDG)
 RUN wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add -
 
 # Add the PGDG snapshot repository for PostgreSQL 18 (for Bookworm)
-RUN echo "deb https://apt.postgresql.org/pub/repos/apt/ bookworm-pgdg-snapshot main 18" > /etc/apt/sources.list.d/pgdg.list
+RUN echo "deb https://apt.postgresql.org/pub/repos/apt/ bookworm-pgdg-snapshot main 18" \
+    > /etc/apt/sources.list.d/pgdg.list
 
 # Temporarily add Debian unstable to upgrade postgresql-common
 RUN echo "deb http://deb.debian.org/debian unstable main" > /etc/apt/sources.list.d/unstable.list && \
@@ -30,7 +31,7 @@ Pin: release a=unstable
 Pin-Priority: 1001
 EOF
 
-# Update and install upgraded postgresql-common from unstable; then remove unstable repo
+# Update and install upgraded postgresql-common from unstable; then remove the unstable repo
 RUN apt-get update && apt-get install -y postgresql-common && rm /etc/apt/sources.list.d/unstable.list
 
 # Pin packages from PGDG to ensure snapshot versions are used
@@ -40,8 +41,7 @@ Pin: origin apt.postgresql.org
 Pin-Priority: 1001
 EOF
 
-# Update package lists and install PostgreSQL 18 and its client from PGDG snapshot
-# (This installs the newer libpq5 from PGDG)
+# Update package lists and install PostgreSQL 18 and its client from PGDG snapshot (excluding the JIT package)
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     libpq5 \
     postgresql-18 \
@@ -52,7 +52,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
 # Archive the PostgreSQL installation directories (binaries and shared files)
 RUN tar czf /tmp/pg18.tar.gz /usr/lib/postgresql/18 /usr/share/postgresql/18
 
-# Archive the newer libpq libraries (should be in /usr/lib/x86_64-linux-gnu/)
+# Archive the newer libpq libraries (from PGDG, expected in /usr/lib/x86_64-linux-gnu/)
 RUN tar czf /tmp/libpq.tar.gz /usr/lib/x86_64-linux-gnu/libpq.so.5*
   
 ############################
@@ -60,7 +60,7 @@ RUN tar czf /tmp/libpq.tar.gz /usr/lib/x86_64-linux-gnu/libpq.so.5*
 ############################
 FROM debian:bookworm-slim
 
-# Install runtime dependencies, excluding libpq5 (we will copy it from the builder)
+# Install runtime dependencies, explicitly including libgssapi-krb5-2 to provide libgssapi_krb5.so.2
 RUN apt-get update && apt-get install -y \
     libreadline8 \
     libssl3 \
@@ -74,6 +74,7 @@ RUN apt-get update && apt-get install -y \
     libicu72 \
     perl-base \
     libkrb5-3 \
+    libgssapi-krb5-2 \
  && rm -rf /var/lib/apt/lists/*
 
 # Generate locale and set environment variables
@@ -83,22 +84,22 @@ ENV LC_ALL=en_US.UTF-8
 
 # Set PATH to include PostgreSQL 18 binaries
 ENV PATH="/usr/lib/postgresql/18/bin:${PATH}"
-# Set LD_LIBRARY_PATH so that PostgreSQL finds the correct libpq
+# Set LD_LIBRARY_PATH so that PostgreSQL finds the newer libpq libraries
 ENV LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
 
-# Copy PostgreSQL 18 binaries and shared files from builder stage
+# Copy and extract the PostgreSQL 18 installation from the builder stage
 COPY --from=builder /tmp/pg18.tar.gz /tmp/pg18.tar.gz
 RUN tar xzf /tmp/pg18.tar.gz -C / && rm /tmp/pg18.tar.gz
 
-# Copy the newer libpq libraries from builder stage
+# Copy and extract the newer libpq libraries from the builder stage
 COPY --from=builder /tmp/libpq.tar.gz /tmp/libpq.tar.gz
 RUN tar xzf /tmp/libpq.tar.gz -C / && rm /tmp/libpq.tar.gz
 
-# Create the postgres user and group (if not present) and set up the data directory
+# Create the postgres user and group (if not already present) and set up the data directory
 RUN groupadd -r postgres && useradd -r -g postgres postgres && \
     mkdir -p /var/lib/postgresql/data && chown -R postgres:postgres /var/lib/postgresql/data
 
-# Create /var/run/postgresql directory for lock files and set proper permissions
+# Create /var/run/postgresql for lock files and set proper permissions
 RUN mkdir -p /var/run/postgresql && chown -R postgres:postgres /var/run/postgresql
 
 EXPOSE 5432
