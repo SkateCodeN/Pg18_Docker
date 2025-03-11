@@ -1,0 +1,45 @@
+# Use Debian Bookworm slim as a base
+FROM debian:bookworm-slim
+
+# Install required packages for repository management and key fetching
+RUN apt-get update && apt-get install -y \
+    wget \
+    gnupg \
+    lsb-release \
+    software-properties-common \
+ && rm -rf /var/lib/apt/lists/*
+
+# Add the PostgreSQL signing key
+RUN wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add -
+
+# Add the PGDG snapshot repository for PostgreSQL 18 for Bookworm
+RUN echo "deb https://apt.postgresql.org/pub/repos/apt/ bookworm-pgdg-snapshot main 18" > /etc/apt/sources.list.d/pgdg.list
+
+# Create an apt preferences file to pin packages from apt.postgresql.org with high priority
+RUN cat <<EOF > /etc/apt/preferences.d/pgdg
+Package: *
+Pin: origin apt.postgresql.org
+Pin-Priority: 1001
+EOF
+
+# Update package lists and install PostgreSQL 18 and dependencies from the snapshot repository
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    postgresql-common \
+    libpq5 \
+    postgresql-18 \
+    postgresql-client-18 \
+    postgresql-18-jit \
+    sysstat \
+ && rm -rf /var/lib/apt/lists/*
+
+# Create a directory for PostgreSQL data and set proper ownership
+RUN mkdir -p /var/lib/postgresql/data && chown -R postgres:postgres /var/lib/postgresql/data
+
+EXPOSE 5432
+
+# Switch to the postgres user and initialize the database cluster
+USER postgres
+RUN /usr/lib/postgresql/18/bin/initdb -D /var/lib/postgresql/data
+
+# Set the default command to run PostgreSQL
+CMD ["/usr/lib/postgresql/18/bin/postgres", "-D", "/var/lib/postgresql/data"]

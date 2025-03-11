@@ -1,0 +1,78 @@
+# Use Debian Bookworm slim as the base
+FROM debian:bookworm-slim
+
+# Install necessary packages for repository management and key fetching
+RUN apt-get update && apt-get install -y \
+    locales \
+    wget \
+    gnupg \
+    lsb-release \
+    software-properties-common \
+ && rm -rf /var/lib/apt/lists/*
+
+# Configure and generate the locale (e.g., en_US.UTF-8)
+RUN sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && \
+    locale-gen 
+    
+# Add the PostgreSQL signing key (for PGDG)
+RUN wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add -
+
+# Add the PGDG snapshot repository for PostgreSQL 18 (for Bookworm)
+RUN echo "deb https://apt.postgresql.org/pub/repos/apt/ bookworm-pgdg-snapshot main 18" \
+    > /etc/apt/sources.list.d/pgdg.list
+
+# Temporarily add the Debian unstable repository to obtain a newer postgresql-common
+RUN echo "deb http://deb.debian.org/debian unstable main" \
+    > /etc/apt/sources.list.d/unstable.list
+
+# Pin only the postgresql-common package from unstable to force a version ≥ 252
+RUN cat <<EOF > /etc/apt/preferences.d/postgresql-common
+Package: postgresql-common
+Pin: release a=unstable
+Pin-Priority: 1001
+EOF
+
+# Update package lists
+RUN apt-get update
+
+# Upgrade postgresql-common from unstable (this should install version ≥ 252)
+RUN apt-get install -y postgresql-common
+
+# Remove the unstable repository file to avoid further mix
+RUN rm /etc/apt/sources.list.d/unstable.list
+
+# (Optional) Pin packages from the PGDG repository to ensure correct versions
+RUN cat <<EOF > /etc/apt/preferences.d/pgdg
+Package: *
+Pin: origin apt.postgresql.org
+Pin-Priority: 1001
+EOF
+
+# Update package lists again and install PostgreSQL 18 and related packages from PGDG snapshot
+# We exclude JIT package
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    libpq5 \
+    postgresql-18 \
+    postgresql-client-18 \
+    sysstat \
+ && rm -rf /var/lib/apt/lists/*
+
+# Create a directory for PostgreSQL data and set ownership
+RUN mkdir -p /var/lib/postgresql/data && chown -R postgres:postgres /var/lib/postgresql/data
+
+# Copy the initialization SQL file into the image
+COPY init.sql /tmp/init.sql
+
+EXPOSE 5432
+
+# Switch to the postgres user and initialize the database cluster
+USER postgres
+RUN /usr/lib/postgresql/18/bin/initdb -D /var/lib/postgresql/data
+
+# Temporarily start PostgreSQL in the background, run the SQL script to create the test table, then stop the server.
+RUN /usr/lib/postgresql/18/bin/pg_ctl -D /var/lib/postgresql/data -o "-c listen_addresses=''" -w start && \
+    /usr/lib/postgresql/18/bin/psql -U postgres -f /tmp/init.sql && \
+    /usr/lib/postgresql/18/bin/pg_ctl -D /var/lib/postgresql/data -m fast -w stop
+    
+# Set the default command to run PostgreSQL
+CMD ["/usr/lib/postgresql/18/bin/postgres", "-D", "/var/lib/postgresql/data", "-c", "jit=off"]
