@@ -1,0 +1,4 @@
+Docker
+
+Trimming docker images 3 ways
+https://www.youtube.com/watch?v=vHBHxQfK6cM
