@@ -1,0 +1,100 @@
+ARG BASE=debian:bookworm-slim
+FROM $BASE
+
+# Set PostgreSQL version variables
+ARG PG_VERSION=18~~devel
+ARG PG_MAJOR=${PG_VERSION%%~~*}
+ENV PATH=$PATH:/usr/lib/postgresql/$PG_MAJOR/bin
+
+# Update and install basic packages needed for PGDG repository setup
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      postgresql-common \
+      ca-certificates \
+      gnupg && \
+    rm -rf /var/lib/apt/lists/*
+
+# Run the PGDG setup script
+RUN /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+
+# Add the PGDG snapshot repository for PostgreSQL 18 for Bookworm
+RUN echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] http://apt.postgresql.org/pub/repos/apt/ bookworm-pgdg-snapshot main 18" \
+    > /etc/apt/sources.list.d/pg18.list
+
+# Create a correct APT preferences file for libpq5 using a here-document
+RUN cat <<EOF > /etc/apt/preferences.d/libpq5
+Package: libpq5
+Pin: origin apt.postgresql.org
+Pin-Priority: 1001
+EOF
+
+# Upgrade postgresql-common if needed and clean up
+RUN apt-get update && \
+    apt-get install -y postgresql-common && \
+    rm -rf /var/lib/apt/lists/*
+
+# Disable auto cluster creation
+RUN sed -ri 's/#(create_main_cluster) .*$/\1 = false/' /etc/postgresql-common/createcluster.conf
+
+# Update package lists and install PostgreSQL 18 with version constraint
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      -o Dpkg::Options::="--force-confdef" \
+      -o Dpkg::Options::="--force-confold" \
+      "postgresql-${PG_MAJOR}=${PG_VERSION}*" && \
+    apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false && \
+    rm -rf /var/lib/apt/lists/* /var/cache/* /var/log/*
+
+# Install only the essential runtime dependencies for core PostgreSQL
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      locales \
+      libreadline8 \
+      libssl3 \
+      zlib1g \
+      libc6 \
+      libgcc1 \
+      libstdc++6 \
+      libicu72 \
+      libkrb5-3 \
+      libgssapi-krb5-2 \
+      libcurl4 \
+      libxml2 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Generate locale and set environment variables
+RUN sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && locale-gen
+ENV LANG=en_US.UTF-8
+ENV LC_ALL=en_US.UTF-8
+
+# Adjust the postgres user UID as desired
+RUN usermod -u 26 postgres
+
+# Create necessary directories with proper ownership (run as root)
+RUN mkdir -p /var/lib/postgresql/data /var/run/postgresql && \
+    chown -R postgres:postgres /var/lib/postgresql/data /var/run/postgresql
+
+# Switch to the unprivileged postgres user for initialization
+USER postgres
+
+# Initialize the database cluster (this must be run as postgres)
+RUN /usr/lib/postgresql/$PG_MAJOR/bin/initdb -D /var/lib/postgresql/data -E UTF8
+
+# Switch back to root to create the entrypoint script in a writable location
+USER root
+RUN mkdir -p /usr/local/bin && \
+    cat <<'EOF' > /usr/local/bin/docker-entrypoint.sh
+#!/bin/bash
+/usr/lib/postgresql/18/bin/pg_ctl -D /var/lib/postgresql/data -l /var/log/postgresql.log start
+tail -f /var/log/postgresql.log
+EOF
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh && \
+    chown postgres:postgres /usr/local/bin/docker-entrypoint.sh
+
+# Switch back to postgres
+USER postgres
+
+# Set the entrypoint script
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+
+# Builds but 419 MB

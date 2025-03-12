@@ -1,0 +1,60 @@
+ARG BASE=debian:bookworm-slim
+FROM $BASE
+
+ARG PG_VERSION=18~~devel
+ARG PG_MAJOR=${PG_VERSION%%~~*}
+ENV PATH=$PATH:/usr/lib/postgresql/$PG_MAJOR/bin
+
+# Install initial packages, set up PGDG repository and preferences,
+# disable auto cluster creation, and install PostgreSQL 18.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      postgresql-common ca-certificates gnupg && \
+    rm -rf /var/lib/apt/lists/* && \
+    /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y && \
+    echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] http://apt.postgresql.org/pub/repos/apt/ bookworm-pgdg-snapshot main 18" > /etc/apt/sources.list.d/pg18.list && \
+    cat <<EOF > /etc/apt/preferences.d/libpq5
+Package: libpq5
+Pin: origin apt.postgresql.org
+Pin-Priority: 1001
+EOF && \
+    apt-get update && apt-get install -y postgresql-common && \
+    rm -rf /var/lib/apt/lists/* && \
+    sed -ri 's/#(create_main_cluster) .*$/\1 = false/' /etc/postgresql-common/createcluster.conf && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+      -o Dpkg::Options::="--force-confdef" \
+      -o Dpkg::Options::="--force-confold" \
+      "postgresql-${PG_MAJOR}=${PG_VERSION}*" && \
+    apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false && \
+    rm -rf /var/lib/apt/lists/* /var/cache/* /var/log/*
+
+# Install minimal runtime dependencies, generate locales, adjust postgres UID, and create directories.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      locales libreadline8 libssl3 zlib1g libc6 libgcc1 libstdc++6 \
+      libicu72 libkrb5-3 libgssapi-krb5-2 libcurl4 libxml2 && \
+    rm -rf /var/lib/apt/lists/* && \
+    sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && locale-gen && \
+    usermod -u 26 postgres && \
+    mkdir -p /var/lib/postgresql/data /var/run/postgresql && \
+    chown -R postgres:postgres /var/lib/postgresql/data /var/run/postgresql
+
+# Switch to postgres user and initialize the database cluster.
+USER postgres
+RUN /usr/lib/postgresql/$PG_MAJOR/bin/initdb -D /var/lib/postgresql/data -E UTF8
+
+# Switch back to root to create an entrypoint script in a writable location.
+USER root
+RUN mkdir -p /usr/local/bin && \
+    cat <<'EOF' > /usr/local/bin/docker-entrypoint.sh
+#!/bin/bash
+/usr/lib/postgresql/18/bin/pg_ctl -D /var/lib/postgresql/data -l /var/log/postgresql.log start
+tail -f /var/log/postgresql.log
+EOF && \
+    chmod +x /usr/local/bin/docker-entrypoint.sh && \
+    chown postgres:postgres /usr/local/bin/docker-entrypoint.sh
+
+# Switch back to postgres and set the entrypoint.
+USER postgres
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
